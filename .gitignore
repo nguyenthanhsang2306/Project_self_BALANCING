@@ -1,0 +1,26 @@
+# STM32CubeIDE / GCC build outputs
+Debug/
+Release/
+**/Debug/
+**/Release/
+*.o
+*.d
+*.su
+*.cyclo
+*.map
+*.list
+*.elf
+*.bin
+*.hex
+*.log
+.metadata/
+
+# Arduino / ESP32 build outputs
+build/
+
+# OS & editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.bak
