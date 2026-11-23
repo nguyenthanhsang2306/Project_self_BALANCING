@@ -66,11 +66,11 @@
 #define DEFAULT_KD              6.60f
 #define ANGLE_INTEGRAL_LIMIT   25.0f   /* Anti-windup */
 
-/* Góc cân bằng cơ học mục tiêu đo thực tế trên khung xe (+2.70 độ khi giữ thẳng lúc WEB_ESTOP).
+/* Góc cân bằng cơ học mục tiêu đo thực tế trên khung xe (-1.60 độ).
  * Khóa giữ DEFAULT_ZERO_DEG khi bấm B1 để tránh ghi đè nhầm khi cầm nghiêng nhấn nút.
  * Quy ước chiều dương (+x, +enc, +theta_ref, phím W) = chiều TIẾN thực tế của xe
  * (đồng nhất dấu cả 5 hệ số để bảo toàn 100% chiều vòng cân bằng đã ổn định). */
-#define DEFAULT_ZERO_DEG        2.70f
+#define DEFAULT_ZERO_DEG       -1.60f
 #define B1_CAPTURE_ZERO_ENABLE  0
 #define B1_ZERO_CAPTURE_DEG     8.0f
 #define DEFAULT_CONTROL_SIGN   -1
