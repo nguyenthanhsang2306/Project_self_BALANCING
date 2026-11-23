@@ -106,10 +106,10 @@ bool Motor_Enable(Motor_System_t *s) {
 static int16_t output(int16_t value,int16_t limit,int16_t deadband,int8_t sign) {
     if(!value) return 0;
     int32_t magnitude=value<0?-(int32_t)value:value;
-    /* Bù vùng chết mềm (Soft Deadband Ramp) trong vùng nhỏ |value| < 15:
-     * - Tránh nhảy bậc đột ngột giữa -deadband và +deadband khi qua điểm 0.
-     * - Khi lệch lớn hơn, bù đủ 100% deadband để động cơ đáp ứng lực tức thì. */
-    int32_t db = (magnitude < 15) ? ((deadband * magnitude) / 15) : deadband;
+    /* Bù vùng chết nhanh (Soft Deadband Ramp) chỉ trong vùng cực nhỏ |value| < 10:
+     * - Tránh vùng "mềm" quanh điểm cân bằng để bánh bám cứng ngay khi nghiêng > 0.16°.
+     * - Từ |value| >= 10, cấp đủ 100% deadband để thắng ma sát tĩnh tức thì. */
+    int32_t db = (magnitude < 10) ? ((deadband * magnitude) / 10) : deadband;
     magnitude += db;
     if(magnitude>limit) magnitude=limit;
     return (int16_t)((value<0?-magnitude:magnitude)*sign);

@@ -210,7 +210,7 @@ void SysTick_Handler(void)
 void USART2_IRQHandler(void)
 {
   /* USER CODE BEGIN USART2_IRQn 0 */
-  App_UART_RxIRQ(USART2);
+  Motion_UART_RxIRQ(USART2);
   return;
   /* USER CODE END USART2_IRQn 0 */
   HAL_UART_IRQHandler(&huart2);
@@ -234,5 +234,9 @@ void TIM6_DAC_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void LPUART1_IRQHandler(void)
+{
+  Motion_UART_RxIRQ(LPUART1);
+}
 
 /* USER CODE END 1 */
