@@ -12,6 +12,11 @@ float PID_ComputeWithDerivative(PID_t *p,float measured,float derivative,float d
         PID_Reset(p); return 0;
     }
     float error=p->setpoint-measured;
+    if(fabsf(p->Ki)<=1e-6f) {
+        p->integral=0.0f;
+        p->prev_error=error;
+        return clamp(p->Kp*error+p->Kd*derivative,p->out_min,p->out_max);
+    }
     float next=clamp(p->integral+error*dt,-p->integral_limit,p->integral_limit);
     float output=p->Kp*error+p->Ki*next+p->Kd*derivative;
     /* Freeze integration when it would push an already saturated output further. */

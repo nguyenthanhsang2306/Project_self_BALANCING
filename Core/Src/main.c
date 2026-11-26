@@ -3,7 +3,7 @@
   ******************************************************************************
   * @file           : main.c
   * @brief          : Hardware Skeleton (Branch: main) for STM32L476RG Self-Balancing Robot
-  *                   Khởi tạo Clock 80 MHz, GPIO, I2C1 (MPU6050), TIM1 (PWM 10 kHz),
+  *                   Khởi tạo Clock 80 MHz, GPIO, I2C1 (ICM-20602), TIM1 (PWM 10 kHz),
   *                   TIM2/TIM3 (Encoder x4), TIM6 (200 Hz), USART2 (115200 8N1).
   *                   Xem nhánh Project_self_PID hoặc Project_motion cho thuật toán điều khiển.
   ******************************************************************************
@@ -12,7 +12,7 @@
 
 #include "main.h"
 #include "board_config.h"
-#include "mpu6050.h"
+#include "icm20602.h"
 #include "motor.h"
 #include <math.h>
 
@@ -23,7 +23,7 @@ TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart2;
 
-static MPU6050_t imu;
+static ICM20602_t imu;
 static Motor_System_t motor_sys;
 static uint32_t last_cycles = 0U;
 
@@ -69,10 +69,10 @@ int main(void)
   __HAL_DBGMCU_FREEZE_TIM6();
 
   (void)Motor_Init(&motor_sys, &htim1, &htim2, &htim3);
-  if (MPU6050_Init(&imu, &hi2c1))
+  if (ICM20602_Init(&imu, &hi2c1))
   {
-    MPU6050_SetAxis(&imu, IMU_TILT_AXIS);
-    (void)MPU6050_Calibrate(&imu, IMU_CALIB_SAMPLES);
+    ICM20602_SetAxis(&imu, IMU_TILT_AXIS);
+    (void)ICM20602_Calibrate(&imu, IMU_CALIB_SAMPLES);
   }
 
   __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
@@ -92,7 +92,7 @@ int main(void)
       {
         if (dt > 0.030f) dt = 0.030f;
         if (motor_sys.enc_ready) Motor_ReadEncoders(&motor_sys);
-        if (imu.ready) (void)MPU6050_UpdateAngle(&imu, dt);
+        if (imu.ready) (void)ICM20602_UpdateAngle(&imu, dt);
       }
     }
 
