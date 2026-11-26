@@ -10,6 +10,8 @@ typedef struct {
     volatile bool enabled,cut;
     bool ready;
     bool enc_ready;
+    bool enc_left_ready;
+    bool enc_right_ready;
     int16_t limit,deadband,left,right;
     int8_t left_sign,right_sign;
     int8_t enc_left_sign,enc_right_sign;

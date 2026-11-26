@@ -3,7 +3,12 @@
   ******************************************************************************
   * @file           : main.c
   * @brief          : Standalone Pure Self-Balancing (Cascade PID - Station Keeping)
-  *                   Dự án thuần tự cân bằng đứng yên tại chỗ (STM32L476RG)
+  *                   Thuần tự cân bằng đứng yên tại chỗ trên STM32L476RG:
+  *                   - Đồng bộ lớp an toàn phần cứng: DWT 2.5 ms I2C, TIM6 ISR Watchdog 30 ms,
+  *                     IWDG 500 ms, ngắt hẳn STBY=LOW trong FALL_WAIT, timeout 3s nút B1.
+  *                   - Nâng cấp đứng "đóng đinh": Ki_pos=0.25 giữ tích phân khi rebase 0.60 m,
+  *                     bù khối tâm v_com, khóa góc hướng Yaw (enc_L - enc_R & imu.gz).
+  *                   - Mở song song USART2 (D0/D1) + LPUART1 (D6/A4) tương thích ESP32-C6 Web UI.
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -11,7 +16,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "board_config.h"
-#include "mpu6050.h"
+#include "icm20602.h"
 #include "motor.h"
 #include "balance_controller.h"
 #include <math.h>
@@ -24,37 +29,84 @@ TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef hlpuart1;
 
-static MPU6050_t imu;
+static ICM20602_t imu;
 static Motor_System_t motor_sys;
 static BalanceController_t controller;
 static uint32_t last_cycles = 0U;
-static float last_exec_us = 0.0f;
-static float max_exec_us = 0.0f;
-static uint32_t loop_overrun_5ms = 0U;
+static volatile bool recalib_requested = false;
 
-/* Ring buffer nhận UART2 qua ngắt (RXNEIE) */
-#define RX_RING_SIZE 64U
+/* Đếm tick cứng 5 ms từ TIM6_DAC_IRQn (priority 0) & Watchdog cắt motor độc lập trong ISR */
+static volatile uint32_t tim6_ticks = 0U;
+static volatile uint32_t ctrl_serviced_tick = 0U;
+static volatile bool isr_watchdog_tripped = false;
+
+/* Thống kê thời gian thực & chốt peak/OR qua cửa sổ 40 ms cho Telemetry 25 Hz */
+static uint32_t deadline_miss_count = 0U;
+static uint32_t loop_exec_us = 0U;
+static uint32_t telem_loop_max_us = 0U;
+static uint32_t telem_imu_max_age_ms = 0U;
+static uint32_t telem_prev_i2c_err = 0U;
+static uint8_t telem_sat_latch = 0U;
+static uint32_t telem_seq = 0U;
+
+/* Ring buffer nhận lệnh qua ngắt RXNE cho cả USART2 và LPUART1 */
+#define RX_RING_SIZE 128U
 static volatile uint8_t rx_ring[RX_RING_SIZE];
 static volatile uint16_t rx_head = 0U;
 static volatile uint16_t rx_tail = 0U;
 
-/* Buffer truyền Telemetry non-blocking ra USART2 (PA2/PA3) */
-static char tx_buf[120];
-static volatile uint8_t tx_len = 0U;
-static volatile uint8_t tx_idx = 0U;
+/* Buffer truyền Telemetry non-blocking đồng thời ra USART2 và LPUART1 */
+static char tx_buf[160];
+static int tx_len = 0;
+static int tx_idx_u2 = 0;
+static int tx_idx_lp = 0;
 
 /* Function prototypes -------------------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_LPUART1_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM6_Init(void);
 
-/* Ngắt nhận RXNE cho USART2 (gọi từ stm32l4xx_it.c) */
+static void App_IWDG_Init(void)
+{
+  DBGMCU->APB1FZR1 |= DBGMCU_APB1FZR1_DBG_IWDG_STOP;
+  IWDG->KR = 0xCCCCU; /* Bật IWDG và tự bật xung LSI */
+  IWDG->KR = 0x5555U; /* Mở khóa ghi PR / RLR */
+  IWDG->PR = 3U;      /* LSI (~32 kHz) / 32 ≈ 1 kHz */
+  IWDG->RLR = IWDG_TIMEOUT_MS;
+  for (uint32_t guard = 0U; guard < 100000U && (IWDG->SR != 0U); guard++) { }
+  IWDG->KR = 0xAAAAU;
+}
+
+static inline void App_IWDG_Feed(void)
+{
+  IWDG->KR = 0xAAAAU;
+}
+
+/* Ngắt cứng TIM6 (200 Hz, priority 0): đếm nhịp 5 ms & cắt STBY/PWM nếu vòng chính treo >= 30 ms */
+void App_TIM6_TickIRQ(void)
+{
+  if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE) != RESET)
+  {
+    __HAL_TIM_CLEAR_IT(&htim6, TIM_IT_UPDATE);
+    tim6_ticks++;
+    if (motor_sys.enabled && !motor_sys.cut &&
+        (uint32_t)(tim6_ticks - ctrl_serviced_tick) >= CONTROL_ISR_WATCHDOG_TICKS)
+    {
+      Motor_EmergencyCut(&motor_sys);
+      isr_watchdog_tripped = true;
+    }
+  }
+}
+
+/* Ngắt nhận RXNE cho cả USART2 (PA3/D0) và LPUART1 (PB10/D6) */
 void App_UART_RxIRQ(USART_TypeDef *uart)
 {
   if (!uart) return;
@@ -75,22 +127,36 @@ void App_UART_RxIRQ(USART_TypeDef *uart)
   }
 }
 
-/* Hiệu chuẩn cảm biến MPU6050 (thử lại tối đa 10 lần) & Kích hoạt cân bằng */
+/* Hiệu chuẩn cảm biến ICM-20602 (kiểm tra xe đứng yên) & vào trạng thái an toàn:
+ * - Nếu đang nằm nghiêng (> 15°) -> vào FALL_WAIT với STBY = LOW, chờ dựng thẳng để tự cân bằng.
+ * - Nếu calib lỗi (IMU_MOVING / I2C_READ) -> chốt lỗi an toàn với STBY = LOW. */
 static void SelfBalance_CalibrateAndArm(bool capture_upright_zero)
 {
   BalanceController_EmergencyStop(&controller, "CALIB");
   bool ok = false;
-  for (unsigned attempt = 0; attempt < 10U && !ok; attempt++)
+  for (unsigned attempt = 0; attempt < 3U && !ok; attempt++)
   {
+    App_IWDG_Feed();
     HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-    ok = MPU6050_Init(&imu, &hi2c1);
+    ok = ICM20602_Init(&imu, &hi2c1);
     if (ok)
     {
-      MPU6050_SetAxis(&imu, IMU_TILT_AXIS);
-      ok = MPU6050_Calibrate(&imu, IMU_CALIB_SAMPLES);
+      ICM20602_SetAxis(&imu, IMU_TILT_AXIS);
+      ok = ICM20602_Calibrate(&imu, IMU_CALIB_SAMPLES);
     }
-    if (!ok) HAL_Delay(30);
+    if (!ok)
+    {
+      App_IWDG_Feed();
+      HAL_Delay(30);
+    }
   }
+
+  uint32_t key = __get_PRIMASK();
+  __disable_irq();
+  ctrl_serviced_tick = tim6_ticks;
+  isr_watchdog_tripped = false;
+  __set_PRIMASK(key);
+
   if (ok)
   {
     float zero_deg = DEFAULT_ZERO_DEG;
@@ -103,13 +169,17 @@ static void SelfBalance_CalibrateAndArm(bool capture_upright_zero)
     BalanceController_ClearFault(&controller);
     (void)BalanceController_Arm(&controller);
   }
-  max_exec_us = 0.0f;
-  loop_overrun_5ms = 0U;
-  __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
+  else
+  {
+    BalanceController_EmergencyStop(&controller, imu.error ? imu.error : "IMU_CALIB_ERR");
+  }
+
+  telem_loop_max_us = 0U;
+  telem_imu_max_age_ms = 0U;
   last_cycles = DWT->CYCCNT;
 }
 
-/* Các hàm phụ trợ định dạng số nguyên an toàn (tránh lỗi float của nano.specs) */
+/* Các hàm định dạng số nguyên an toàn (tránh phụ thuộc printf float của nano.specs) */
 static void buf_append_str(char *dst, int *pos, int max_len, const char *s)
 {
   while (s && *s && *pos < max_len - 1) dst[(*pos)++] = *s++;
@@ -132,6 +202,18 @@ static void buf_append_int(char *dst, int *pos, int max_len, int32_t val)
   while (i > 0 && *pos < max_len - 1) dst[(*pos)++] = tmp[--i];
 }
 
+static void buf_append_uint(char *dst, int *pos, int max_len, uint32_t val)
+{
+  char tmp[16];
+  int i = 0;
+  do
+  {
+    tmp[i++] = (char)('0' + (val % 10U));
+    val /= 10U;
+  } while (val > 0U && i < (int)sizeof(tmp));
+  while (i > 0 && *pos < max_len - 1) dst[(*pos)++] = tmp[--i];
+}
+
 static void buf_append_tenths(char *dst, int *pos, int max_len, float val)
 {
   if (!isfinite(val)) val = 0.0f;
@@ -146,34 +228,16 @@ static void buf_append_tenths(char *dst, int *pos, int max_len, float val)
   buf_append_int(dst, pos, max_len, scaled % 10);
 }
 
-/* Đẩy Telemetry giám sát ra USART2 non-blocking (0 ms blocking) */
-static void App_SendTelemetry(void)
+static const char *App_GetEncStateStr(void)
 {
-  if (tx_idx < tx_len) return;
-
-  int pos = 0;
-  /* STAT:<pitch>,<zero>,<theta_ref>,<x_mm>,<pwm>,<reason>,<exec_us>,<over5ms> */
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), "STAT:");
-  buf_append_tenths(tx_buf, &pos, (int)sizeof(tx_buf), imu.pitch_kalman);
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
-  buf_append_tenths(tx_buf, &pos, (int)sizeof(tx_buf), controller.nominal_balance_angle);
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
-  buf_append_tenths(tx_buf, &pos, (int)sizeof(tx_buf), controller.theta_ref);
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
-  buf_append_int(tx_buf, &pos, (int)sizeof(tx_buf), (int32_t)lroundf(controller.x * 1000.0f));
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
-  buf_append_int(tx_buf, &pos, (int)sizeof(tx_buf), (int32_t)lroundf(controller.output));
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), controller.reason ? controller.reason : "IDLE");
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
-  buf_append_int(tx_buf, &pos, (int)sizeof(tx_buf), (int32_t)lroundf(last_exec_us));
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
-  buf_append_int(tx_buf, &pos, (int)sizeof(tx_buf), (int32_t)loop_overrun_5ms);
-  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), "\r\n");
-  tx_buf[pos] = '\0';
-
-  tx_len = (uint8_t)pos;
-  tx_idx = 0U;
+  if (!motor_sys.enc_ready) return "INIT_ERR";
+  if (controller.enc_fault_left) return "LOSS_L";
+  if (controller.enc_fault_right) return "LOSS_R";
+  if (controller.enc_no_signal) return "NO_SIG";
+  if (controller.motor_stalled) return "STALL";
+  if (!controller.encoder_enabled) return "DIS";
+  if (controller.enc_signal_active) return "OK";
+  return "WAIT";
 }
 
 static void App_PollUART(void)
@@ -183,14 +247,14 @@ static void App_PollUART(void)
     char c = (char)rx_ring[rx_tail];
     rx_tail = (uint16_t)((rx_tail + 1U) % RX_RING_SIZE);
 
-    if (c == 'x' || c == 'X')
+    if (c == '!' || c == 'x' || c == 'X')
     {
-      BalanceController_EmergencyStop(&controller, "UART_STOP");
+      BalanceController_EmergencyStop(&controller, (c == '!') ? "WEB_ESTOP" : "UART_STOP");
     }
-    else if ((c == 'i' || c == 'I' || c == 'c' || c == 'C') &&
+    else if ((c == 'i' || c == 'I') &&
              (!controller.armed || controller.fall_waiting))
     {
-      SelfBalance_CalibrateAndArm(false);
+      recalib_requested = true;
     }
     else if ((c == 'z' || c == 'Z') &&
              (!controller.armed || controller.fall_waiting) &&
@@ -198,17 +262,87 @@ static void App_PollUART(void)
     {
       BalanceController_SetZeroAngle(&controller, imu.pitch_kalman);
     }
-    else if ((c == 'r' || c == 'R') && !controller.armed && imu.ready)
+    else if ((c == 'r' || c == 'R') && !controller.armed)
     {
+      bool was_latched = controller.fault_latched;
+      uint32_t key = __get_PRIMASK();
+      __disable_irq();
+      ctrl_serviced_tick = tim6_ticks;
+      isr_watchdog_tripped = false;
+      __set_PRIMASK(key);
+
       BalanceController_ClearFault(&controller);
-      (void)BalanceController_Arm(&controller);
+      if (!BalanceController_Arm(&controller))
+      {
+        controller.fault_latched = was_latched;
+      }
     }
   }
 
-  if (tx_idx < tx_len && (USART2->ISR & USART_ISR_TXE))
+  /* Đẩy non-blocking từng byte Telemetry đồng thời ra USART2 (D1) và LPUART1 (A4 -> ESP32-C6) */
+  if (tx_idx_u2 < tx_len && (USART2->ISR & USART_ISR_TXE))
   {
-    USART2->TDR = (uint8_t)tx_buf[tx_idx++];
+    USART2->TDR = (uint8_t)tx_buf[tx_idx_u2++];
   }
+  if (tx_idx_lp < tx_len && (LPUART1->ISR & USART_ISR_TXE))
+  {
+    LPUART1->TDR = (uint8_t)tx_buf[tx_idx_lp++];
+  }
+}
+
+/* Đóng gói Telemetry 25 Hz chuẩn 17 trường tương thích trực tiếp ESP32-C6 Web UI */
+static void App_SendTelemetry(void)
+{
+  if (tx_idx_u2 < tx_len || tx_idx_lp < tx_len) return;
+
+  uint32_t snap_imu_age = telem_imu_max_age_ms;
+  uint32_t snap_loop_us = telem_loop_max_us;
+  uint8_t snap_sat = telem_sat_latch;
+  telem_imu_max_age_ms = 0U;
+  telem_loop_max_us = 0U;
+  telem_sat_latch = 0U;
+
+  int pos = 0;
+  /* STAT:<pitch>,<theta_ref>,0,X,<reason>,<v_com_cms>,<zero_deg>,<output>,
+   *      <enc_l>,<enc_r>,<enc_state>,<t_ms>,<seq>,<imu_max_age_ms>,<loop_max_us>,<miss_cnt>,<sat_latch> */
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), "STAT:");
+  buf_append_tenths(tx_buf, &pos, (int)sizeof(tx_buf), imu.pitch_kalman);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_tenths(tx_buf, &pos, (int)sizeof(tx_buf), controller.theta_ref);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",0,X,");
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), controller.reason ? controller.reason : "STOP");
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_int(tx_buf, &pos, (int)sizeof(tx_buf), (int32_t)lroundf(controller.v * 100.0f));
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_tenths(tx_buf, &pos, (int)sizeof(tx_buf), controller.nominal_balance_angle);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  int32_t out_i = isfinite(controller.output) ? (int32_t)lroundf(controller.output) : 0;
+  buf_append_int(tx_buf, &pos, (int)sizeof(tx_buf), out_i);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_int(tx_buf, &pos, (int)sizeof(tx_buf), motor_sys.enc_left_total);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_int(tx_buf, &pos, (int)sizeof(tx_buf), motor_sys.enc_right_total);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), App_GetEncStateStr());
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_uint(tx_buf, &pos, (int)sizeof(tx_buf), HAL_GetTick());
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_uint(tx_buf, &pos, (int)sizeof(tx_buf), telem_seq++);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_uint(tx_buf, &pos, (int)sizeof(tx_buf), snap_imu_age);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_uint(tx_buf, &pos, (int)sizeof(tx_buf), snap_loop_us);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_uint(tx_buf, &pos, (int)sizeof(tx_buf), deadline_miss_count);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), ",");
+  buf_append_uint(tx_buf, &pos, (int)sizeof(tx_buf), (uint32_t)snap_sat);
+  buf_append_str(tx_buf, &pos, (int)sizeof(tx_buf), "\r\n");
+  tx_buf[pos] = '\0';
+
+  tx_len = pos;
+  tx_idx_u2 = 0;
+  tx_idx_lp = 0;
+  App_PollUART();
 }
 
 int main(void)
@@ -216,31 +350,38 @@ int main(void)
   HAL_Init();
   SystemClock_Config();
 
-  /* Khởi tạo toàn bộ ngoại vi duy nhất 1 lần thông qua CubeMX HAL */
+  /* Khởi tạo toàn bộ ngoại vi duy nhất 1 lần */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  MX_LPUART1_UART_Init();
   MX_I2C1_Init();
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM6_Init();
 
-  /* Kích hoạt DWT cycle counter đo thời gian thực thi chính xác */
+  /* Kích hoạt DWT cycle counter đo thời gian thực thi & bounded I2C */
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CYCCNT = 0;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
   __HAL_DBGMCU_FREEZE_TIM6();
 
+  App_IWDG_Init();
+
   (void)Motor_Init(&motor_sys, &htim1, &htim2, &htim3);
   BalanceController_Init(&controller, &imu, &motor_sys);
 
-  /* Hiệu chuẩn MPU6050 và sẵn sàng ở trạng thái an toàn (nếu nghiêng > 18° vào FALL_WAIT) */
+  /* Hiệu chuẩn ICM-20602 (kiểm tra đứng yên) & vào trạng thái an toàn (nghiêng > 15° -> FALL_WAIT STBY=LOW) */
   SelfBalance_CalibrateAndArm(false);
 
-  __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
-  (void)HAL_TIM_Base_Start(&htim6);
+  tim6_ticks = 0U;
+  ctrl_serviced_tick = 0U;
+  isr_watchdog_tripped = false;
+  __HAL_TIM_CLEAR_IT(&htim6, TIM_IT_UPDATE);
+  (void)HAL_TIM_Base_Start_IT(&htim6);
   last_cycles = DWT->CYCCNT;
 
+  uint32_t last_ctrl_tick = tim6_ticks;
   uint32_t b1_low_ms = 0U;
   uint32_t last_telem_ms = HAL_GetTick();
 
@@ -248,56 +389,116 @@ int main(void)
   {
     App_PollUART();
 
-    /* 1. Vòng lặp điều khiển 200 Hz: chỉ kích bởi cờ phần cứng TIM6 (không trộn HAL_GetTick) */
-    if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE) != RESET)
+    if (isr_watchdog_tripped)
     {
-      __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
+      isr_watchdog_tripped = false;
+      BalanceController_EmergencyStop(&controller, "LOOP_WDT");
+    }
 
-      uint32_t t_loop_start = DWT->CYCCNT;
-      float dt = last_cycles ? ((float)(t_loop_start - last_cycles) / (float)SystemCoreClock) : 0.005f;
-      last_cycles = t_loop_start;
-
-      /* Bỏ qua nếu chu kỳ bất thường quá ngắn (< 1 ms) tránh làm sai Kalman & PID */
-      if (isfinite(dt) && dt >= 0.001f)
+    if (recalib_requested)
+    {
+      recalib_requested = false;
+      if (!controller.armed || controller.fall_waiting)
       {
-        if (dt > 0.030f) dt = 0.030f;
-
-        if (motor_sys.enc_ready)
-        {
-          Motor_ReadEncoders(&motor_sys);
-        }
-
-        if (imu.ready)
-        {
-          if (MPU6050_UpdateAngle(&imu, dt))
-          {
-            /* Chỉ chạy khi đã ARM và KHÔNG bị chốt lỗi an toàn (fault_latched) */
-            if (controller.armed && !controller.fault_latched)
-            {
-              (void)BalanceController_Update(&controller, dt);
-            }
-          }
-          else if (controller.armed)
-          {
-            BalanceController_EmergencyStop(&controller, "I2C_ERR");
-          }
-        }
-
-        uint32_t t_loop_end = DWT->CYCCNT;
-        last_exec_us = (float)(t_loop_end - t_loop_start) / ((float)SystemCoreClock / 1000000.0f);
-        if (last_exec_us > max_exec_us) max_exec_us = last_exec_us;
-        if (last_exec_us > 5000.0f) loop_overrun_5ms++;
+        SelfBalance_CalibrateAndArm(false);
+        last_ctrl_tick = tim6_ticks;
       }
     }
 
-    /* 2. Gửi dữ liệu Telemetry mỗi 40 ms (25 Hz) hoàn toàn non-blocking */
-    if (HAL_GetTick() - last_telem_ms >= 40U)
+    /* 1. Vòng điều khiển 200 Hz: kích bởi ngắt cứng TIM6 priority 0 */
+    uint32_t cur_tick = tim6_ticks;
+    if (cur_tick != last_ctrl_tick)
     {
-      last_telem_ms = HAL_GetTick();
-      App_SendTelemetry();
+      uint32_t t_start = DWT->CYCCNT;
+      uint32_t elapsed_ticks = cur_tick - last_ctrl_tick;
+      last_ctrl_tick = cur_tick;
+      if (elapsed_ticks > 1U)
+      {
+        deadline_miss_count += (elapsed_ticks - 1U);
+        telem_sat_latch |= CTRL_SAT_DEADLINE_MISS;
+      }
+
+      float dt = last_cycles ? ((float)(t_start - last_cycles) / (float)SystemCoreClock) : 0.005f;
+      last_cycles = t_start;
+
+      if (motor_sys.enc_ready)
+      {
+        Motor_ReadEncoders(&motor_sys);
+      }
+
+      bool actively_balancing = (controller.armed && !controller.fall_waiting && !controller.fault_latched);
+      if (isr_watchdog_tripped)
+      {
+        isr_watchdog_tripped = false;
+        BalanceController_EmergencyStop(&controller, "LOOP_WDT");
+      }
+      else if (actively_balancing && (elapsed_ticks > CONTROL_MAX_MISSED_TICKS || !isfinite(dt) || dt > CONTROL_MAX_DT_S))
+      {
+        BalanceController_EmergencyStop(&controller, "DEADLINE_ERR");
+      }
+      else if (imu.ready && isfinite(dt) && dt >= 0.001f)
+      {
+        float imu_dt = (dt > CONTROL_MAX_DT_S) ? CONTROL_MAX_DT_S : dt;
+        bool imu_ok = ICM20602_UpdateAngle(&imu, imu_dt);
+        if (imu.sample_age_ms > telem_imu_max_age_ms)
+        {
+          telem_imu_max_age_ms = imu.sample_age_ms;
+        }
+        if (imu.i2c_err_count != telem_prev_i2c_err)
+        {
+          telem_sat_latch |= CTRL_SAT_I2C_ERR;
+          telem_prev_i2c_err = imu.i2c_err_count;
+        }
+        if (!imu.last_read_fresh)
+        {
+          telem_sat_latch |= CTRL_SAT_IMU_PRED;
+        }
+
+        if (isr_watchdog_tripped)
+        {
+          isr_watchdog_tripped = false;
+          BalanceController_EmergencyStop(&controller, "LOOP_WDT");
+        }
+        else if (imu_ok)
+        {
+          if (controller.armed && !controller.fault_latched)
+          {
+            (void)BalanceController_Update(&controller, dt);
+            telem_sat_latch |= controller.sat_flags;
+          }
+          else
+          {
+            ICM20602_SetLinearAccel(&imu, 0.0f);
+          }
+        }
+        else if (controller.armed)
+        {
+          BalanceController_EmergencyStop(&controller, imu.error ? imu.error : "IMU_FAULT");
+        }
+      }
+
+      if (!isr_watchdog_tripped)
+      {
+        ctrl_serviced_tick = tim6_ticks;
+        App_IWDG_Feed();
+      }
+      loop_exec_us = (DWT->CYCCNT - t_start) / (SystemCoreClock / 1000000U);
+      if (loop_exec_us > telem_loop_max_us)
+      {
+        telem_loop_max_us = loop_exec_us;
+      }
+
+      /* 2. Gửi Telemetry 25 Hz (mỗi 40 ms, non-blocking ra cả USART2 & LPUART1) */
+      if (HAL_GetTick() - last_telem_ms >= TELEMETRY_PERIOD_MS)
+      {
+        last_telem_ms = HAL_GetTick();
+        App_SendTelemetry();
+      }
     }
 
-    /* 3. Nút nhấn xanh B1 (PC13): cắt motor NGAY LẬP TỨC trước khi chờ nhả nút -> calib & mở khóa */
+    /* 3. Nút nhấn xanh B1 (PC13):
+     *    - Đang cân bằng (BALANCE) -> cắt motor NGAY LẬP TỨC & chốt B1_ESTOP (STBY = LOW).
+     *    - Đang dừng / FALL_WAIT / lỗi -> chờ nhả nút (timeout tối đa 3 giây, có feed IWDG) rồi calib & mở lại. */
     if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
     {
       if (b1_low_ms == 0U)
@@ -306,13 +507,21 @@ int main(void)
       }
       else if (HAL_GetTick() - b1_low_ms > 50U)
       {
-        BalanceController_EmergencyStop(&controller, "B1_CALIB");
-        while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
+        bool was_balancing = (controller.armed && !controller.fall_waiting);
+        BalanceController_EmergencyStop(&controller, was_balancing ? "B1_ESTOP" : "B1_CALIB");
+        uint32_t wait_start = HAL_GetTick();
+        while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET &&
+               (HAL_GetTick() - wait_start < 3000U))
         {
+          App_IWDG_Feed();
           HAL_Delay(10);
         }
         b1_low_ms = 0U;
-        SelfBalance_CalibrateAndArm(true);
+        if (!was_balancing && HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET)
+        {
+          SelfBalance_CalibrateAndArm(true);
+        }
+        last_ctrl_tick = tim6_ticks;
       }
     }
     else
@@ -321,9 +530,9 @@ int main(void)
     }
 
     /* 4. Đèn LED xanh LD2 (PA5):
-     * - Sáng đứng: Đang cân bằng (BALANCE)
-     * - Nháy 200ms: Đang chờ dựng thẳng <= 18° (FALL_WAIT)
-     * - Tắt: Lỗi / Đang khóa an toàn (cần bấm B1 để khởi động lại) */
+     * - Sáng đứng: Đang cân bằng tại chỗ (BALANCE)
+     * - Nháy 200ms: Đang chờ dựng thẳng <= 15° (FALL_WAIT, STBY = LOW)
+     * - Tắt: Lỗi / Đang chốt an toàn (cần bấm B1 hoặc gửi 'r' để mở lại) */
     if (controller.armed && !controller.fault_latched)
     {
       if (controller.fall_waiting)
@@ -531,8 +740,23 @@ static void MX_USART2_UART_Init(void)
   huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
   if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
 
-  /* Bật ngắt nhận RXNE cho ring buffer (không dùng HAL_UART_Receive_IT để tránh xung đột RDR) */
   USART2->CR1 |= USART_CR1_RXNEIE;
+}
+
+static void MX_LPUART1_UART_Init(void)
+{
+  hlpuart1.Instance = LPUART1;
+  hlpuart1.Init.BaudRate = 115200;
+  hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+  hlpuart1.Init.StopBits = UART_STOPBITS_1;
+  hlpuart1.Init.Parity = UART_PARITY_NONE;
+  hlpuart1.Init.Mode = UART_MODE_TX_RX;
+  hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&hlpuart1) != HAL_OK) Error_Handler();
+
+  LPUART1->CR1 |= USART_CR1_RXNEIE;
 }
 
 static void MX_GPIO_Init(void)
