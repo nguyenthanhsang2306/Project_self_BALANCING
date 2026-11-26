@@ -40,9 +40,9 @@ Chỉ cần **4 sợi dây Dupont** nối giữa 2 bo mạch đúng như bảng 
 1. Trong STM32CubeIDE, mở dự án **`Project_Motion`** (hoặc **`Project_Self_PID`** nếu chỉ thử đứng yên tại chỗ).
 2. Chọn **Project $\rightarrow$ Clean...** rồi bấm **Build (biểu tượng cái búa)** và **Run / Debug** để nạp vào mạch STM32.
 3. Ngay khi cấp nguồn:
-   * Đặt xe nằm yên khoảng **0.5 giây** để MPU6050 tự hiệu chuẩn nhanh.
-   * Đèn xanh `LD2`: **sáng đứng** = đang cân bằng (`BALANCE`), **nháy chậm** = chờ dựng xe (`FALL_WAIT`), **tắt** = chốt lỗi an toàn (`MOTOR_CUT` / `IMU_FAULT` / `WEB_ESTOP`).
-   * Bấm giữ nút xanh **`B1`** trên bo STM32 để ngắt motor ngay, hiệu chuẩn lại MPU6050 (giữ nguyên mốc `DEFAULT_ZERO_DEG = -3.65f` khi `B1_CAPTURE_ZERO_ENABLE = 0`) và xóa chốt lỗi. Nút **Calib IMU (`i`)** và **Set Zero (`z`)** trên Web cũng chỉ chạy được khi xe đang dừng / nằm nghỉ.
+   * Đặt xe nằm yên hoàn toàn khoảng **0.7–1 giây** để **ICM-20602** hiệu chuẩn sạch (`300` mẫu kèm kiểm tra đứng yên `IMU_MOVING`), sau đó xe giữ an toàn ở trạng thái **`DISARMED`** (`STBY = LOW`, motor tắt).
+   * Đèn xanh `LD2`: **nháy chậm (500 ms)** = đã calib xong đang chờ lệnh **`MỞ KHÓA / ARM ('r')`**, **sáng đứng** = đang cân bằng (`BALANCE`), **nháy nhanh (40 ms)** = đang nhận lệnh `W/A/S/D`, **tắt** = đang chốt lỗi an toàn (`FALL_LATCH` / `WEB_ESTOP` / `LOOP_WDT` / `IMU_FAULT` / `ENC_LOSS`).
+   * Bấm giữ nút xanh **`B1`** trên bo STM32 để ngắt motor ngay, hiệu chuẩn lại ICM-20602 (giữ nguyên mốc `DEFAULT_ZERO_DEG = +1.50f` khi `B1_CAPTURE_ZERO_ENABLE = 0`) và xóa chốt lỗi. Nút **Calib IMU (`i`)** và **Set Zero (`z`)** trên Web cũng chỉ chạy được khi xe đang dừng / nằm nghỉ.
 
 ---
 

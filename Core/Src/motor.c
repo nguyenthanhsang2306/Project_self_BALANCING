@@ -14,7 +14,9 @@ static void direction(int16_t left,int16_t right) {
 }
 
 void Motor_EmergencyCut(Motor_System_t *s) {
-    s->cut=true; s->enabled=false; standby(false);
+    s->cut=true; s->enabled=false;
+    __DMB();
+    standby(false);
     if(s->ready) {
         __HAL_TIM_SET_COMPARE(s->timer,TIM_CHANNEL_1,0);
         __HAL_TIM_SET_COMPARE(s->timer,TIM_CHANNEL_2,0);
@@ -52,15 +54,19 @@ bool Motor_Init(Motor_System_t *s,TIM_HandleTypeDef *timer,TIM_HandleTypeDef *en
     /* Kích hoạt MOE (Main Output Enable) cho TIM1 để xuất xung ra chân PA8 & PA9 */
     __HAL_TIM_MOE_ENABLE(timer);
 
-    /* Khởi tạo Encoder nếu có cung cấp */
+    /* Khởi tạo Encoder và kiểm tra chặt trạng thái từng kênh (KHÔNG bỏ qua mã lỗi HAL) */
     if(enc_l && enc_r) {
         s->enc_left = enc_l;
         s->enc_right = enc_r;
-        (void)HAL_TIM_Encoder_Start(enc_l, TIM_CHANNEL_ALL);
-        (void)HAL_TIM_Encoder_Start(enc_r, TIM_CHANNEL_ALL);
-        s->prev_cnt_left = (uint16_t)__HAL_TIM_GET_COUNTER(enc_l);
-        s->prev_cnt_right = (uint16_t)__HAL_TIM_GET_COUNTER(enc_r);
-        s->enc_ready = true;
+        s->enc_left_ready  = (HAL_TIM_Encoder_Start(enc_l, TIM_CHANNEL_ALL) == HAL_OK);
+        s->enc_right_ready = (HAL_TIM_Encoder_Start(enc_r, TIM_CHANNEL_ALL) == HAL_OK);
+        if(s->enc_left_ready) {
+            s->prev_cnt_left = (uint16_t)__HAL_TIM_GET_COUNTER(enc_l);
+        }
+        if(s->enc_right_ready) {
+            s->prev_cnt_right = (uint16_t)__HAL_TIM_GET_COUNTER(enc_r);
+        }
+        s->enc_ready = (s->enc_left_ready && s->enc_right_ready);
     }
 
     s->ready=true; Motor_Stop(s); return true;
@@ -97,19 +103,24 @@ void Motor_ResetEncoders(Motor_System_t *s) {
 }
 
 bool Motor_Enable(Motor_System_t *s) {
-    if(!s->ready) return false;
+    uint32_t key=__get_PRIMASK(); __disable_irq();
+    if(!s->ready) { __set_PRIMASK(key); return false; }
     s->cut=false; s->enabled=true;
+    __DMB();
     standby(true);
+    __set_PRIMASK(key);
     return true;
 }
 
 static int16_t output(int16_t value,int16_t limit,int16_t deadband,int8_t sign) {
     if(!value) return 0;
     int32_t magnitude=value<0?-(int32_t)value:value;
-    /* Bù vùng chết nhanh (Soft Deadband Ramp) chỉ trong vùng cực nhỏ |value| < 10:
-     * - Tránh vùng "mềm" quanh điểm cân bằng để bánh bám cứng ngay khi nghiêng > 0.16°.
-     * - Từ |value| >= 10, cấp đủ 100% deadband để thắng ma sát tĩnh tức thì. */
-    int32_t db = (magnitude < 10) ? ((deadband * magnitude) / 10) : deadband;
+    /* Bù vùng chết mềm tuyến tính quanh điểm 0 (|value| < MOTOR_DEADBAND_RAMP):
+     * - Hạ độ dốc quanh 0 để nhiễu gyro không đập qua lại độ rơ hộp số GA12-N20.
+     * - Không tạo vùng chết phẳng (luôn có mô-men tỷ lệ ngay từ |value| >= 1).
+     * - Từ |value| >= MOTOR_DEADBAND_RAMP, cấp đủ 100% deadband để thắng ma sát tĩnh. */
+    const int32_t ramp = (MOTOR_DEADBAND_RAMP > 0) ? MOTOR_DEADBAND_RAMP : 1;
+    int32_t db = (magnitude < ramp) ? ((deadband * magnitude) / ramp) : deadband;
     magnitude += db;
     if(magnitude>limit) magnitude=limit;
     return (int16_t)((value<0?-magnitude:magnitude)*sign);
@@ -124,9 +135,11 @@ static bool apply(Motor_System_t *s,int16_t left,int16_t right,int16_t limit,int
     bool changed=((left>0)-(left<0))!=((s->left>0)-(s->left<0)) ||
                  ((right>0)-(right<0))!=((s->right>0)-(s->right<0));
     if(changed) { direction(left,right); }
+    /* Cập nhật trực tiếp CCR1/CCR2 trên nền PWM 10 kHz (chu kỳ 100 us);
+     * TUYỆT ĐỐI KHÔNG ghi TIM_EGR_UG khi đảo chiều để tránh xóa TIM1->CNT giữa chu kỳ
+     * gây giãn xung bất thường trên bánh còn lại và làm gằn hộp số N20 quanh điểm 0. */
     __HAL_TIM_SET_COMPARE(s->timer,TIM_CHANNEL_1,left<0?-left:left);
     __HAL_TIM_SET_COMPARE(s->timer,TIM_CHANNEL_2,right<0?-right:right);
-    if(changed) s->timer->Instance->EGR=TIM_EGR_UG;
     s->left=left; s->right=right;
     standby(true);
     __set_PRIMASK(key); return true;

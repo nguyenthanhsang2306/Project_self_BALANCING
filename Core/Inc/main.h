@@ -51,6 +51,7 @@ extern "C" {
 
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 void Motion_UART_RxIRQ(USART_TypeDef *uart);
+void Motion_TIM6_TickIRQ(void);
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);

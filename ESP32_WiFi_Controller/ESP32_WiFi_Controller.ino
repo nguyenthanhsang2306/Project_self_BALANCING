@@ -44,9 +44,9 @@ static bool diagPending = false;
 static unsigned long lastDiagMs = 0;
 
 // Latest telemetry line from STM32 (protected by stateMutex)
-static char uartRxBuf[160];
+static char uartRxBuf[200];
 static size_t uartRxLen = 0;
-static char latestStat[160] = "STAT:0.0,0.0,0,X,INIT,0,0.0,0,0,0,WAIT";
+static char latestStat[200] = "STAT:0.0,0.0,0,X,DISARMED,0,0.0,0,0,0,WAIT_LR,0,0,0,0,0,0";
 static bool broadcastPending = false;
 
 // =========================================================================
@@ -139,7 +139,8 @@ static const char HTML_PAGE[] PROGMEM = R"rawliteral(
     <span id="wsBadge" class="badge err">WS: DANG KET NOI...</span>
     <span id="stateBadge" class="badge">TRANG THAI: --</span>
   </div>
-  <div id="diagBar" style="font-size:11px;color:#94a3b8;text-align:center;margin-bottom:8px;">TX: 0 cmd (--) &bull; RX UART: 0 B &bull; WS: 0</div>
+  <div id="diagBar" style="font-size:11px;color:#94a3b8;text-align:center;margin-bottom:4px;">TX: 0 cmd (--) &bull; RX UART: 0 B &bull; WS: 0</div>
+  <div id="healthBar" style="font-size:11px;color:#38bdf8;text-align:center;margin-bottom:8px;">Loop: -- us &bull; Miss: 0 &bull; IMU: -- ms &bull; Sat: 0x0 &bull; Seq: 0</div>
 
   <div class="panel">
     <div class="grid-stat">
@@ -189,14 +190,14 @@ static const char HTML_PAGE[] PROGMEM = R"rawliteral(
 
   <div class="log-panel">
     <div class="log-hdr">
-      <span>LOG TELEMETRY (T1-T4)</span>
+      <span>LOG TELEMETRY 25Hz (FAIL-SAFE)</span>
       <div class="log-btns">
         <button class="log-btn" id="btnLogPause" onclick="toggleLogPause()">Tam dung</button>
         <button class="log-btn" id="btnLogCopy" onclick="copyLog()">Copy</button>
         <button class="log-btn" onclick="clearLog()">Xoa</button>
       </div>
     </div>
-    <textarea id="logBox" readonly placeholder="t_ms,pitch,thRef,vCmd,cmd,state,vReal,zero,out,encL,encR,encSt"></textarea>
+    <textarea id="logBox" readonly placeholder="pitch,thRef,vCmd,cmd,state,vReal,zero,out,encL,encR,encSt,t_ms,seq,imuAge,loopUs,miss,sat"></textarea>
   </div>
 
 <script>
@@ -207,13 +208,12 @@ static const char HTML_PAGE[] PROGMEM = R"rawliteral(
   let hbTimer = null;
   let robotReason = "--";
   let logPaused = false;
-  let logStartMs = 0;
   const logLines = [];
 
   function renderLogBox() {
     const box = document.getElementById("logBox");
     if (!box) return;
-    box.value = "t_ms,pitch,thRef,vCmd,cmd,state,vReal,zero,out,encL,encR,encSt\n" + logLines.join("\n");
+    box.value = "pitch,thRef,vCmd,cmd,state,vReal,zero,out,encL,encR,encSt,t_ms,seq,imuAge,loopUs,miss,sat\n" + logLines.join("\n");
     box.scrollTop = box.scrollHeight;
   }
 
@@ -228,7 +228,6 @@ static const char HTML_PAGE[] PROGMEM = R"rawliteral(
 
   function clearLog() {
     logLines.length = 0;
-    logStartMs = 0;
     renderLogBox();
   }
 
@@ -275,20 +274,24 @@ static const char HTML_PAGE[] PROGMEM = R"rawliteral(
     document.getElementById("vOut").innerText = (p.length >= 8 ? p[7] : "--");
     document.getElementById("vEnc").innerText = (p.length >= 10 ? (p[8] + " / " + p[9]) : "--");
     document.getElementById("vEncSt").innerText = (p.length >= 11 ? p[10] : "--");
+    if (p.length >= 17) {
+      const satHex = parseInt(p[16], 10).toString(16).toUpperCase();
+      document.getElementById("healthBar").innerText =
+        "Loop: " + p[14] + " us \u2022 Miss: " + p[15] + " \u2022 IMU: " + p[13] + " ms \u2022 Sat: 0x" + satHex + " \u2022 Seq: " + p[12];
+    }
 
     if (!logPaused) {
-      const now = Date.now();
-      if (logStartMs === 0) logStartMs = now;
-      logLines.push((now - logStartMs) + "," + raw);
-      if (logLines.length > 35) logLines.shift();
+      logLines.push(raw);
+      if (logLines.length > 75) logLines.shift();
       renderLogBox();
     }
 
     robotReason = p[4];
     const sb = document.getElementById("stateBadge");
     const isRun = (robotReason === "BALANCE" || robotReason === "OK");
+    const isWarn = (robotReason === "DISARMED" || robotReason.startsWith("ARM_") || robotReason === "CALIB");
     sb.innerText = "TRANG THAI: " + robotReason;
-    sb.className = isRun ? "badge ok" : (robotReason === "FALL_WAIT" ? "badge warn" : "badge err");
+    sb.className = isRun ? "badge ok" : (isWarn ? "badge warn" : "badge err");
 
     document.getElementById("btnCalib").disabled = isRun;
     document.getElementById("btnZero").disabled = isRun;
@@ -583,7 +586,7 @@ static void wsBroadcastWork(void *arg) {
     return;
   }
 
-  char statPayload[160];
+  char statPayload[200];
   size_t statLen = 0;
   bool sendStat = false;
   uint32_t txSnap = 0;
@@ -623,7 +626,7 @@ static void wsBroadcastWork(void *arg) {
     return;
   }
 
-  char combinedPayload[256];
+  char combinedPayload[280];
   int combinedLen = 0;
   if (sendStat && statLen > 0) {
     combinedLen = snprintf(combinedPayload, sizeof(combinedPayload), "%s\nDIAG:%lu,%c,%lu,%d",
@@ -687,7 +690,7 @@ static esp_err_t indexHandler(httpd_req_t *req) {
 }
 
 static esp_err_t statusHandler(httpd_req_t *req) {
-  char payload[256];
+  char payload[280];
   if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     snprintf(payload, sizeof(payload), "%s\nDIAG:%lu,%c,%lu,0",
              latestStat,
@@ -852,7 +855,7 @@ void loop() {
   // 1. Read incoming telemetry lines from STM32 on UART1 (GPIO17)
   uint32_t rxNewBytes = 0;
   bool statUpdated = false;
-  char completedStat[160];
+  char completedStat[200];
   while (stm32Serial.available() > 0) {
     consumeUartRxByte(stm32Serial.read(), rxNewBytes, statUpdated, completedStat, sizeof(completedStat));
   }
