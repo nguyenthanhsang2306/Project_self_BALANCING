@@ -1,0 +1,1 @@
+﻿PASS: v4.1 PID/PPID/YPID/RAMP checks, NaN/range, motor commands, gates, telemetry parsing, chart framing. No COM port opened.

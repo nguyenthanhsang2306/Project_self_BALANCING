@@ -12,7 +12,7 @@ typedef struct {
     bool enc_ready;
     bool enc_left_ready;
     bool enc_right_ready;
-    int16_t limit,deadband,left,right;
+    int16_t limit,deadband,deadband_ramp,left,right;
     int8_t left_sign,right_sign;
     int8_t enc_left_sign,enc_right_sign;
     uint16_t prev_cnt_left,prev_cnt_right;
@@ -25,7 +25,6 @@ bool Motor_Enable(Motor_System_t *);
 void Motor_EmergencyCut(Motor_System_t *); /* ISR-safe, latch cannot be cleared by SetSpeed */
 void Motor_Stop(Motor_System_t *);
 bool Motor_SetSpeed(Motor_System_t *,int16_t left,int16_t right);
-bool Motor_SetSpeedRaw(Motor_System_t *,int16_t left,int16_t right);
 bool Motor_SetManual(Motor_System_t *,int16_t left,int16_t right);
 void Motor_ReadEncoders(Motor_System_t *);
 void Motor_ResetEncoders(Motor_System_t *);

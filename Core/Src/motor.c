@@ -34,15 +34,18 @@ void Motor_Stop(Motor_System_t *s) {
 
 bool Motor_Init(Motor_System_t *s,TIM_HandleTypeDef *timer,TIM_HandleTypeDef *enc_l,TIM_HandleTypeDef *enc_r) {
     memset(s,0,sizeof(*s)); s->cut=true; standby(false);
-    s->limit=DEFAULT_PWM_LIMIT; s->deadband=DEFAULT_DEADBAND;
+    s->limit=DEFAULT_PWM_LIMIT;
+    s->deadband=DEFAULT_DEADBAND;
+    s->deadband_ramp=MOTOR_DEADBAND_RAMP;
     s->left_sign=DEFAULT_LEFT_SIGN; s->right_sign=DEFAULT_RIGHT_SIGN;
     s->enc_left_sign=DEFAULT_ENC_LEFT_SIGN; s->enc_right_sign=DEFAULT_ENC_RIGHT_SIGN;
 
     if(!timer || timer->Instance!=TIM1) return false;
-    timer->Instance->CR1 &= ~(TIM_CR1_DIR | TIM_CR1_CMS);
-    timer->Instance->PSC = 7U;
-    timer->Instance->ARR = 999U;
-    timer->Instance->EGR = TIM_EGR_UG;
+    uint32_t clock=HAL_RCC_GetPCLK2Freq();
+    if(RCC->CFGR&RCC_CFGR_PPRE2) clock*=2U;
+    uint32_t frequency=clock/(timer->Instance->PSC+1U)/(timer->Instance->ARR+1U);
+    if(frequency!=10000U || timer->Instance->ARR!=999U ||
+       (timer->Instance->CR1&(TIM_CR1_DIR|TIM_CR1_CMS))) return false;
     s->timer=timer;
     __HAL_TIM_SET_COMPARE(timer,TIM_CHANNEL_1,0);
     __HAL_TIM_SET_COMPARE(timer,TIM_CHANNEL_2,0);
@@ -54,7 +57,7 @@ bool Motor_Init(Motor_System_t *s,TIM_HandleTypeDef *timer,TIM_HandleTypeDef *en
     /* Kích hoạt MOE (Main Output Enable) cho TIM1 để xuất xung ra chân PA8 & PA9 */
     __HAL_TIM_MOE_ENABLE(timer);
 
-    /* Khởi tạo Encoder và kiểm tra chặt trạng thái từng kênh (KHÔNG bỏ qua mã lỗi HAL) */
+    /* Khởi tạo Encoder và kiểm tra chặt trạng thái từng kênh */
     if(enc_l && enc_r) {
         s->enc_left = enc_l;
         s->enc_right = enc_r;
@@ -112,24 +115,24 @@ bool Motor_Enable(Motor_System_t *s) {
     return true;
 }
 
-static int16_t output(int16_t value,int16_t limit,int16_t deadband,int8_t sign) {
+static int16_t output(int16_t value,int16_t limit,int16_t deadband,int16_t deadband_ramp,int8_t sign) {
     if(!value || (deadband>0 && value>=-2 && value<=2)) return 0;
     int32_t magnitude=value<0?-(int32_t)value:value;
-    /* Bù vùng chết mềm tuyến tính quanh điểm 0 (|value| < MOTOR_DEADBAND_RAMP):
+    /* Bù vùng chết mềm tuyến tính quanh điểm 0 (|value| < deadband_ramp):
      * - Hạ độ dốc quanh 0 để nhiễu gyro không đập qua lại độ rơ hộp số GA12-N20.
-     * - Từ |value| >= MOTOR_DEADBAND_RAMP, cấp đủ 100% deadband để thắng ma sát tĩnh. */
-    const int32_t ramp = (MOTOR_DEADBAND_RAMP > 0) ? MOTOR_DEADBAND_RAMP : 1;
+     * - Từ |value| >= deadband_ramp, cấp đủ 100% deadband để thắng ma sát tĩnh. */
+    int32_t ramp = (deadband_ramp > 0) ? deadband_ramp : 1;
     int32_t db = (magnitude < ramp) ? ((deadband * magnitude) / ramp) : deadband;
     magnitude += db;
     if(magnitude>limit) magnitude=limit;
     return (int16_t)((value<0?-magnitude:magnitude)*sign);
 }
 
-static bool apply(Motor_System_t *s,int16_t left,int16_t right,int16_t limit,int16_t deadband) {
+static bool apply(Motor_System_t *s,int16_t left,int16_t right,int16_t limit,int16_t deadband,int16_t ramp) {
     uint32_t key=__get_PRIMASK(); __disable_irq();
     if(!s->ready || !s->enabled || s->cut) { __set_PRIMASK(key); return false; }
-    left=output(left,limit,deadband,s->left_sign);
-    right=output(right,limit,deadband,s->right_sign);
+    left=output(left,limit,deadband,ramp,s->left_sign);
+    right=output(right,limit,deadband,ramp,s->right_sign);
 
     bool changed=((left>0)-(left<0))!=((s->left>0)-(s->left<0)) ||
                  ((right>0)-(right<0))!=((s->right>0)-(s->right<0));
@@ -143,13 +146,9 @@ static bool apply(Motor_System_t *s,int16_t left,int16_t right,int16_t limit,int
 }
 
 bool Motor_SetSpeed(Motor_System_t *s,int16_t left,int16_t right) {
-    return apply(s,left,right,s->limit,s->deadband);
-}
-
-bool Motor_SetSpeedRaw(Motor_System_t *s,int16_t left,int16_t right) {
-    return apply(s,left,right,s->limit,0);
+    return apply(s,left,right,s->limit,s->deadband,s->deadband_ramp);
 }
 
 bool Motor_SetManual(Motor_System_t *s,int16_t left,int16_t right) {
-    return apply(s,left,right,MANUAL_MAX_PWM,0);
+    return apply(s,left,right,MANUAL_MAX_PWM,0,1);
 }

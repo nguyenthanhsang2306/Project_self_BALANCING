@@ -1,0 +1,1 @@
+﻿PASS: v4.2 inputs preserved; 6V Presets/PPID/YPID/DEAD/RAMP/EDIR/YSIGN verified; malformed angle rejected. No COM port opened.
