@@ -61,6 +61,7 @@ typedef struct {
     float x_wheel;              /* Độ lệch trục bánh xe thuần [m] */
     float v_wheel;              /* Vận tốc trục bánh xe đã lọc [m/s] */
     float v_wheel_prev;         /* Vận tốc bánh chu kỳ trước để ước lượng a_lin cho Kalman */
+    float a_wheel_filt;         /* Gia tốc bánh xe đã lọc thông thấp cho Kalman */
     float x_prev;               /* Vị trí bánh xe chu kỳ trước */
     float theta_ref;            /* Góc nghiêng bù vòng ngoài 50 Hz [độ] */
     float theta_ref_filt;       /* Góc nghiêng bù đã lọc mượt ở 200 Hz [độ] */
