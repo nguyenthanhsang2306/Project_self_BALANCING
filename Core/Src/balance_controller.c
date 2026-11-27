@@ -20,6 +20,7 @@ static void reset_position(BalanceController_t *c) {
     Motor_ResetEncoders(c->motor);
     c->x = c->x_wheel = c->x_prev = 0.0f;
     c->v = c->v_wheel = c->v_wheel_prev = 0.0f;
+    c->a_wheel_filt = 0.0f;
     c->x_ref = 0.0f;
     c->v_ref = 0.0f;
     c->theta_ref = 0.0f;
@@ -353,10 +354,11 @@ static bool position_and_motion_loop(BalanceController_t *c, float dtp) {
     c->v_wheel += alpha * (raw_v_wheel - c->v_wheel);
     c->v += alpha * (raw_v_com - c->v);
 
-    /* 5. Ước lượng gia tốc tịnh tiến bánh xe cấp sang Kalman IMU để khử lệch góc khi tăng/giảm tốc */
-    float a_wheel_mps2 = (c->v_wheel - c->v_wheel_prev) / dtp;
+    /* 5. Ước lượng gia tốc tịnh tiến bánh xe (lọc thông thấp) cấp sang Kalman IMU */
+    float raw_a_wheel = (c->v_wheel - c->v_wheel_prev) / dtp;
     c->v_wheel_prev = c->v_wheel;
-    float a_imu_g = -(float)c->control_sign * (a_wheel_mps2 / GRAVITY_G);
+    c->a_wheel_filt += 0.25f * (raw_a_wheel - c->a_wheel_filt);
+    float a_imu_g = -(float)c->control_sign * (c->a_wheel_filt / GRAVITY_G);
     ICM20602_SetLinearAccel(c->imu, a_imu_g);
 
     /* 6. Xác định chế độ DI CHUYỂN (gồm giai đoạn phanh) hay ĐỨNG YÊN */
@@ -414,7 +416,7 @@ static bool position_and_motion_loop(BalanceController_t *c, float dtp) {
 
         if (fabsf(c->x - c->x_ref) > POS_RUNAWAY_M) {
             c->x_ref = c->x;
-            PID_Reset(&c->pid_pos);
+            c->pid_pos.prev_error = 0.0f;
         } else {
             c->x_ref = clampf(c->x_ref, c->x - MOTION_TRACK_ERR_MAX, c->x + MOTION_TRACK_ERR_MAX);
         }

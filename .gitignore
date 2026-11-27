@@ -17,6 +17,11 @@ Release/
 
 # Arduino / ESP32 build outputs
 build/
+build_check/
+
+# Host unit tests & PID Panel runtime logs
+tests/*.exe
+Motor_PID_Panel/PID_log_*.txt
 
 # OS & editor junk
 .DS_Store

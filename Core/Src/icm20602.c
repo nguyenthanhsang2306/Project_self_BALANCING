@@ -55,11 +55,14 @@ static void i2c_bus_recover(I2C_HandleTypeDef *bus) {
     g.Pull=GPIO_PULLUP;
     HAL_GPIO_Init(GPIOB,&g);
 
-    for(unsigned i=0;i<9U;i++) {
+    for(unsigned i=0;i<16U;i++) {
         HAL_GPIO_WritePin(GPIOB,GPIO_PIN_8,GPIO_PIN_RESET);
-        dwt_delay_us(5U);
+        dwt_delay_us(10U);
         HAL_GPIO_WritePin(GPIOB,GPIO_PIN_8,GPIO_PIN_SET);
-        dwt_delay_us(5U);
+        dwt_delay_us(10U);
+        if(i>=8U && HAL_GPIO_ReadPin(GPIOB,GPIO_PIN_9)==GPIO_PIN_SET) {
+            break;
+        }
     }
 
     /* Phát điều kiện STOP (SDA từ LOW -> HIGH khi SCL = HIGH) */
@@ -68,13 +71,13 @@ static void i2c_bus_recover(I2C_HandleTypeDef *bus) {
     g.Pull=GPIO_PULLUP;
     HAL_GPIO_Init(GPIOB,&g);
     HAL_GPIO_WritePin(GPIOB,GPIO_PIN_9,GPIO_PIN_RESET);
-    dwt_delay_us(5U);
+    dwt_delay_us(10U);
     HAL_GPIO_WritePin(GPIOB,GPIO_PIN_8,GPIO_PIN_SET);
-    dwt_delay_us(5U);
+    dwt_delay_us(10U);
     HAL_GPIO_WritePin(GPIOB,GPIO_PIN_9,GPIO_PIN_SET);
-    dwt_delay_us(5U);
+    dwt_delay_us(10U);
 
-    /* Reset cứng thanh ghi I2C1 và cấu hình lại chân PB8/PB9 AF4_I2C1 + Timing chuẩn 200kHz */
+    /* Reset cứng thanh ghi I2C1 và cấu hình lại chân PB8/PB9 AF4_I2C1 + Timing chuẩn 100kHz */
     (void)HAL_I2C_DeInit(bus);
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_I2C1_CLK_ENABLE();
@@ -89,17 +92,24 @@ static void i2c_bus_recover(I2C_HandleTypeDef *bus) {
     g.Alternate=GPIO_AF4_I2C1;
     HAL_GPIO_Init(GPIOB,&g);
 
-    bus->Init.Timing=0x10425F73U;
+    bus->Init.Timing=IMU_I2C_TIMING;
     (void)HAL_I2C_Init(bus);
     (void)HAL_I2CEx_ConfigAnalogFilter(bus,I2C_ANALOGFILTER_ENABLE);
-    (void)HAL_I2CEx_ConfigDigitalFilter(bus,4);
+    (void)HAL_I2CEx_ConfigDigitalFilter(bus,IMU_I2C_DNF);
 }
 #endif
 
 #ifndef UNIT_TEST
+static bool i2c_abort_transfer(I2C_TypeDef *i2c, uint32_t err_mask) {
+    i2c->ICR = err_mask | I2C_ICR_STOPCF;
+    i2c->CR2 &= ~(I2C_CR2_SADD | I2C_CR2_HEAD10R | I2C_CR2_NBYTES |
+                  I2C_CR2_RELOAD | I2C_CR2_RD_WRN | I2C_CR2_AUTOEND);
+    return false;
+}
+
 /* Đọc thanh ghi I2C ở mức thanh ghi với giới hạn thời gian cứng bằng DWT (us).
  * Loại bỏ hoàn toàn bẫy chờ 25 ms (I2C_TIMEOUT_BUSY & I2C_TIMEOUT_STOPF) trong STM32 HAL,
- * đảm bảo tuyệt đối không bao giờ treo vòng 200 Hz gây LOOP_WDT khi nhiễu PWM/EMI trên dây I2C. */
+ * đảm bảo tuyệt đối không bao giờ treo vòng 200 Hz gây DEADLINE_MISS khi nhiễu PWM/EMI trên dây I2C. */
 static bool i2c_mem_read_bounded_us(I2C_HandleTypeDef *bus, uint16_t dev_addr, uint8_t reg,
                                     uint8_t *buf, uint16_t len, uint32_t timeout_us) {
     if (!bus || !bus->Instance || !buf || len == 0U || len > 255U) return false;
@@ -125,12 +135,16 @@ static bool i2c_mem_read_bounded_us(I2C_HandleTypeDef *bus, uint16_t dev_addr, u
                I2C_CR2_START;
 
     while ((i2c->ISR & I2C_ISR_TXIS) == 0U) {
-        if ((i2c->ISR & err_mask) != 0U || (uint32_t)(DWT->CYCCNT - t0) > max_cycles) return false;
+        if ((i2c->ISR & err_mask) != 0U || (uint32_t)(DWT->CYCCNT - t0) > max_cycles) {
+            return i2c_abort_transfer(i2c, err_mask);
+        }
     }
     i2c->TXDR = reg;
 
     while ((i2c->ISR & I2C_ISR_TC) == 0U) {
-        if ((i2c->ISR & err_mask) != 0U || (uint32_t)(DWT->CYCCNT - t0) > max_cycles) return false;
+        if ((i2c->ISR & err_mask) != 0U || (uint32_t)(DWT->CYCCNT - t0) > max_cycles) {
+            return i2c_abort_transfer(i2c, err_mask);
+        }
     }
 
     /* Pha 2: Repeated START (Read) đọc liên tiếp len byte với AUTOEND */
@@ -142,14 +156,18 @@ static bool i2c_mem_read_bounded_us(I2C_HandleTypeDef *bus, uint16_t dev_addr, u
 
     for (uint16_t i = 0U; i < len; i++) {
         while ((i2c->ISR & I2C_ISR_RXNE) == 0U) {
-            if ((i2c->ISR & err_mask) != 0U || (uint32_t)(DWT->CYCCNT - t0) > max_cycles) return false;
+            if ((i2c->ISR & err_mask) != 0U || (uint32_t)(DWT->CYCCNT - t0) > max_cycles) {
+                return i2c_abort_transfer(i2c, err_mask);
+            }
         }
         buf[i] = (uint8_t)i2c->RXDR;
     }
 
     /* Pha 3: Chờ cờ STOPF (tự sinh bởi AUTOEND) trong cùng ngân sách timeout_us */
     while ((i2c->ISR & I2C_ISR_STOPF) == 0U) {
-        if ((i2c->ISR & err_mask) != 0U || (uint32_t)(DWT->CYCCNT - t0) > max_cycles) return false;
+        if ((i2c->ISR & err_mask) != 0U || (uint32_t)(DWT->CYCCNT - t0) > max_cycles) {
+            return i2c_abort_transfer(i2c, err_mask);
+        }
     }
     i2c->ICR = I2C_ICR_STOPCF;
     i2c->CR2 &= ~(I2C_CR2_SADD | I2C_CR2_HEAD10R | I2C_CR2_NBYTES |
@@ -178,13 +196,23 @@ static bool read_regs(ICM20602_t *s,uint8_t reg,uint8_t *buf,uint16_t len) {
                             buf,len,IMU_IO_TIMEOUT_MS)==HAL_OK;
 #else
     /* Khi đã vào vòng điều khiển 200Hz (s->ready == true):
-     * Dùng đọc thanh ghi có giới hạn cứng 2.5 ms bằng DWT -> tổng thời gian xấu nhất
-     * kể cả phục hồi bus chỉ <= 2.8 ms (< 5 ms), KHÔNG BAO GIỜ chạm bẫy 25 ms của HAL gây LOOP_WDT. */
+     * Đọc có giới hạn cứng bằng DWT. Nếu dính gai EMI thoáng qua, phục hồi bus và chỉ thử đọc lại
+     * 1 lần khi còn đủ ngân sách thời gian < IMU_RETRY_BUDGET_US để tổng chu kỳ luôn < 5 ms. */
     if(s->ready) {
+        if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U) {
+            CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+            DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+        }
+        uint32_t t0 = DWT->CYCCNT;
         if(i2c_mem_read_bounded_us(s->hi2c, s->address, reg, buf, len, IMU_RUNTIME_TIMEOUT_US)) {
             return true;
         }
         i2c_bus_recover(s->hi2c);
+        uint32_t budget_cycles = (SystemCoreClock / 1000000U) * IMU_RETRY_BUDGET_US;
+        if ((uint32_t)(DWT->CYCCNT - t0) < budget_cycles &&
+            i2c_mem_read_bounded_us(s->hi2c, s->address, reg, buf, len, IMU_RUNTIME_TIMEOUT_US)) {
+            return true;
+        }
         return false;
     }
     for(unsigned attempt=0;attempt<2U;attempt++) {
@@ -299,6 +327,11 @@ bool ICM20602_Init(ICM20602_t *s,I2C_HandleTypeDef *bus) {
     };
     for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++)
         if(!write_reg(s,regs[i][0],regs[i][1])) return fail(s,"IMU_CONFIG");
+#if IMU_USE_FIXED_GYRO_BIAS
+    s->gyro_x_offset = IMU_GYRO_X_OFFSET_LSB;
+    s->gyro_y_offset = IMU_GYRO_Y_OFFSET_LSB;
+    s->gyro_z_offset = IMU_GYRO_Z_OFFSET_LSB;
+#endif
 #ifndef UNIT_TEST
     IWDG->KR = 0xAAAAU;
 #endif
@@ -336,7 +369,13 @@ bool ICM20602_Calibrate(ICM20602_t *s,uint16_t samples) {
     if(samples<20 || samples>2000) samples=100;
     float mean[6]={0};
     float vmin[6]={0}, vmax[6]={0};
-    s->gyro_x_offset=s->gyro_y_offset=s->gyro_z_offset=0;
+#if IMU_USE_FIXED_GYRO_BIAS
+    s->gyro_x_offset = IMU_GYRO_X_OFFSET_LSB;
+    s->gyro_y_offset = IMU_GYRO_Y_OFFSET_LSB;
+    s->gyro_z_offset = IMU_GYRO_Z_OFFSET_LSB;
+#else
+    s->gyro_x_offset = s->gyro_y_offset = s->gyro_z_offset = 0.0f;
+#endif
     HAL_Delay(20);
     for(unsigned i=0;i<samples;i++) {
 #ifndef UNIT_TEST
@@ -374,9 +413,17 @@ bool ICM20602_Calibrate(ICM20602_t *s,uint16_t samples) {
         return fail(s,"IMU_ACC_ERR");
     }
 
-    s->gyro_x_offset=mean[3]*65.5f;
-    s->gyro_y_offset=mean[4]*65.5f;
-    s->gyro_z_offset=mean[5]*65.5f;
+#if IMU_USE_FIXED_GYRO_BIAS
+    /* Khóa nguyên 3 offset gyro LSB đo từ 12000 mẫu (không ghi đè bằng trung bình 300 mẫu).
+     * Chỉ trừ 1 lần trong ICM20602_ReadData(); kalman.bias = 0 sẽ tự hấp thụ trôi nhiệt dư. */
+    s->gyro_x_offset = IMU_GYRO_X_OFFSET_LSB;
+    s->gyro_y_offset = IMU_GYRO_Y_OFFSET_LSB;
+    s->gyro_z_offset = IMU_GYRO_Z_OFFSET_LSB;
+#else
+    s->gyro_x_offset = mean[3] * 65.5f;
+    s->gyro_y_offset = mean[4] * 65.5f;
+    s->gyro_z_offset = mean[5] * 65.5f;
+#endif
     memset(&s->kalman,0,sizeof(s->kalman));
     s->pitch_acc=s->pitch_kalman=s->kalman.angle=tilt(s,mean[0],mean[1],mean[2]);
     s->gyro_rate_pitch=0.0f;

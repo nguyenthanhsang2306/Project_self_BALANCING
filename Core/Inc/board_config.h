@@ -7,7 +7,7 @@
 /* ======================================================================
  * SƠ ĐỒ ĐẤU DÂY PHẦN CỨNG: STM32L476RG Nucleo-64 + TB6612FNG + ICM-20602 + ESP32-C6
  *
- * 1. IMU ICM-20602 (I2C1 @ 200 kHz, Timing = 0x10425F73, địa chỉ 0x68):
+ * 1. IMU ICM-20602 (I2C1 @ 100 kHz, Timing = 0x30955763, DNF = 10, địa chỉ 0x68):
  *    - VCC: 3V3 (hoặc 5V qua ổn áp trên module)
  *    - GND: GND
  *    - CS:  3V3 (khóa cứng chế độ I2C)
@@ -59,23 +59,23 @@
 #define ARM_MAX_RATE_DPS       80.0f
 #define FALL_ANGLE_DEG         35.0f
 
-/* Công suất & Bù vùng chết động cơ (TIM1 ARR = 999 -> 10 kHz)
- * - DEFAULT_DEADBAND = 130, MOTOR_DEADBAND_RAMP = 35 (~0.56°): làm mềm độ lợi quanh 0
- *   (từ 15.5x xuống 4.7x) để triệt tiêu gằn bánh răng hộp số GA12-N20 do nhiễu gyro,
- *   nhưng vẫn đạt đủ lực bứt ma sát tĩnh (~165 PWM) ngay khi nghiêng > 0.56°. */
+/* Công suất & Bù vùng chết động cơ (TIM1 ARR = 999 -> 10 kHz, VM ổn áp 6.0V)
+ * - DEFAULT_DEADBAND = 110, MOTOR_DEADBAND_RAMP = 48: làm mềm độ lợi quanh 0
+ *   để triệt tiêu gằn bánh răng hộp số GA12-N20 do nhiễu gyro,
+ *   nhưng vẫn đạt đủ lực bứt ma sát tĩnh 6.0V khi nghiêng thực. */
 #define DEFAULT_PWM_LIMIT     999
 #define ABSOLUTE_PWM_LIMIT    999
 #define MANUAL_MAX_PWM        999
-#define DEFAULT_DEADBAND      130
-#define MOTOR_DEADBAND_RAMP    35
+#define DEFAULT_DEADBAND      110
+#define MOTOR_DEADBAND_RAMP    48
 
-/* ---------------- VÒNG TRONG: PD GÓC THUẦN (200 Hz) ----------------
+/* ---------------- VÒNG TRONG: PD GÓC THUẦN (200 Hz, VM = 6.0V) ----------------
  * Tắt tích phân vòng trong (DEFAULT_KI = 0.00f) để khử tích phân kép gây dao động
  * chu kỳ giới hạn (hunting) qua độ rơ hộp số N20; bù lệch tĩnh do vòng ngoài đảm nhiệm:
- *   Kp = 62.00, Ki = 0.00, Kd = 6.60 */
-#define DEFAULT_KP             62.00f
+ *   Kp = 92.00, Ki = 0.00, Kd = 5.50 */
+#define DEFAULT_KP             92.00f
 #define DEFAULT_KI              0.00f
-#define DEFAULT_KD              6.60f
+#define DEFAULT_KD              5.50f
 #define ANGLE_INTEGRAL_LIMIT   25.0f   /* Dự phòng nếu bật Ki thủ công */
 
 /* Góc cân bằng cơ học mục tiêu đo thực tế trên khung xe với module ICM-20602 (+1.50 độ).
@@ -94,15 +94,15 @@
 #define DEFAULT_ENC_RIGHT_SIGN -1
 
 /* ---------------- VÒNG NGOÀI: PID VỊ TRÍ ĐỨNG YÊN (50 Hz) ----------------
- *   Kp_pos = 2.40 độ/m, Kd_pos = 3.40 độ/(m/s)
- *   Ki_pos = 0.05 độ/(m.s), giới hạn tích phân 60 -> tối đa ±3.0° để chuyển mượt bumpless */
-#define DEFAULT_KP_POS          2.40f
-#define DEFAULT_KI_POS          0.05f
-#define DEFAULT_KD_POS          3.40f
+ *   Kp_pos = 9.00 độ/m, Kd_pos = 12.50 độ/(m/s)
+ *   Ki_pos = 1.80 độ/(m.s), giới hạn tích phân 3.20 -> tối đa ±5.76° bù lệch trọng tâm tĩnh */
+#define DEFAULT_KP_POS          9.00f
+#define DEFAULT_KI_POS          1.80f
+#define DEFAULT_KD_POS         12.50f
 #define MAX_TARGET_ANGLE_DEG    8.0f
-#define POS_INTEGRAL_LIMIT     60.0f
+#define POS_INTEGRAL_LIMIT      3.20f
 #define POS_LOOP_DIVIDER        4U     /* 50 Hz (20 ms) */
-#define VEL_FILTER_N            8.0f   /* Bộ lọc đạo hàm bậc 1 (N = 8) */
+#define VEL_FILTER_N           16.0f   /* Bộ lọc đạo hàm bậc 1 (N = 16 -> trễ ~62ms) */
 #define POS_RUNAWAY_M           0.60f
 
 /* ---------------- THÔNG SỐ ĐIỀU KHIỂN DI CHUYỂN TỪ ESP32-C6 ----------------
@@ -116,8 +116,8 @@
 #define MOTION_SPEED_MAX        0.30f
 #define MOTION_ACCEL            0.50f  /* Gia tốc ramp v_ref (m/s^2) khởi động dứt khoát */
 #define MOTION_DECEL            0.70f  /* Gia tốc giảm tốc (m/s^2) phanh mượt về 0 */
-#define MOTION_KP_VEL           5.5f   /* Vòng PI vận tốc: hệ số P [độ/(m/s)] */
-#define MOTION_KI_VEL           6.5f   /* Vòng PI vận tốc: hệ số I [độ/m] (tự bù zero & ma sát) */
+#define MOTION_KP_VEL           9.0f   /* Vòng PI vận tốc: hệ số P [độ/(m/s)] */
+#define MOTION_KI_VEL           9.0f   /* Vòng PI vận tốc: hệ số I [độ/m] (tự bù zero & ma sát) */
 #define MOTION_VEL_INT_LIMIT    5.5f   /* Giới hạn anti-windup tích phân vận tốc [độ] */
 #define MOTION_THETA_LPF_ALPHA  0.35f  /* Làm mượt nhẹ theta_ref ở 200Hz (tau ~12ms, giữ phản xạ nhanh) */
 #define MOTION_BRAKE_VEL_MPS    0.04f  /* Ngưỡng tốc độ thực để chuyển mượt về giữ vị trí đứng yên [m/s] */
@@ -137,13 +137,13 @@
 #define DEFAULT_YAW_SIGN         (-1)
 #define MOTION_TURN_RATE_DPS     95.0f /* Tốc độ góc rẽ mục tiêu khi giữ A/D [độ/s] */
 #define MOTION_YAW_FF            1.15f /* Feedforward vi sai theo tốc độ góc đặt [PWM/(độ/s)] */
-#define MOTION_KP_YAW_RATE       1.10f /* Hệ số P khóa tốc độ góc yaw [PWM/(độ/s)] */
+#define MOTION_KP_YAW_RATE       1.20f /* Hệ số P khóa tốc độ góc yaw [PWM/(độ/s)] */
 #define MOTION_KI_YAW_HEADING    8.00f /* Hệ số giữ góc hướng đi thẳng (tự bù lệch 2 motor N20) [PWM/độ] */
 #define MOTION_YAW_HEADING_LIM  12.0f  /* Biên tích lũy sai số góc hướng [độ] (tối đa ±96 PWM bù lệch) */
 #define MOTION_YAW_DEADZONE_DPS  0.35f /* Ngưỡng bỏ qua trôi tĩnh gyro Z khi đứng yên [độ/s] */
 
 /* ---------------- BÙ VẬN TỐC KHỐI TÂM (CoM) & ENCODER ĐO THỰC TẾ ---------------- */
-#define COM_HEIGHT_M             0.035f /* Khoảng cách trục bánh -> khối tâm thân xe l_com [m] */
+#define COM_HEIGHT_M             0.033f /* Chiều cao khối tâm từ CAD Khung_Frame.step: 32.9 mm */
 #define WHEEL_RADIUS_M           0.022f /* Bánh xe đo thực tế D = 44 mm -> r = 0.022 m */
 #define DEFAULT_ENC_CPR       1400.0f   /* 1:50 -> 7*4*50 = 1400 xung/vòng */
 #define DEFAULT_ENC_ENABLE       1
@@ -156,22 +156,31 @@
 
 /* Cấu hình trục cảm biến ICM-20602 & Kalman chống lệch gia tốc:
  *   1 = Trục Y: atan2(-ax, az); 0 = Trục X: atan2(ay, az)
- *   - ICM-20602 DLPF Gyro = 2 (92 Hz, trễ 3.9 ms) & DLPF Accel = 3 (44.8 Hz; đổi thành 4 = 21.2 Hz nếu rung mạnh).
- *   - I2C1 mặc định 200 kHz (0x10425F73) an toàn dây Dupont; nếu dây ngắn có thể nâng 400 kHz (0x1042203A). */
+ *   - ICM-20602 DLPF Gyro = 2 (92 Hz / 3.9 ms) & DLPF Accel = 3 (44.8 Hz), đồng bộ phép đo 20261127_141016.
+ *   - I2C1 @ 100 kHz (0x30955763) + bộ lọc số DNF = 10 (125 ns) chống xung nhiễu EMI dây Dupont. */
 #define IMU_TILT_AXIS            1
-#define ICM20602_GYRO_DLPF_CFG   2U     /* Thanh ghi 0x1A: 2 = 92 Hz (trễ 3.9 ms) */
-#define ICM20602_ACCEL_DLPF_CFG  3U     /* Thanh ghi 0x1D: 3 = 44.8 Hz (4 = 21.2 Hz) */
-#define GYRO_LPF_ALPHA          0.70f
+#define ICM20602_GYRO_DLPF_CFG   2U     /* Thanh ghi 0x1A: 2 = 92 Hz / 3.9 ms (đồng bộ phép đo 20261127_141016) */
+#define ICM20602_ACCEL_DLPF_CFG  3U     /* Thanh ghi 0x1D: 3 = 44.8 Hz (đồng bộ phép đo 20261127_141016) */
+#define GYRO_LPF_ALPHA          0.55f
+/* Offset gyro cố định (LSB @ +-500 dps, 65.5 LSB/(deg/s)) đo tĩnh 12000 mẫu [90,150)s @ 29.39°C
+ * (log 20261127_141016, kiểm chứng chéo [30,60)s dư < 0.009 dps). Chỉ trừ 1 lần trong ReadData(). */
+#define IMU_USE_FIXED_GYRO_BIAS  1
+#define IMU_GYRO_X_OFFSET_LSB  (-8.784917f)
+#define IMU_GYRO_Y_OFFSET_LSB   (21.700750f)
+#define IMU_GYRO_Z_OFFSET_LSB  (-14.417417f)
+#define IMU_I2C_TIMING          0x30955763U /* 100 kHz @ PCLK1=80MHz, DNF=10 (PRESC=3, SCLDEL=9, SDADEL=5, SCLH=0x57, SCLL=0x63) */
+#define IMU_I2C_DNF             10U         /* Bộ lọc số chống xung nhiễu EMI 125 ns (10 * 12.5 ns) */
 #define IMU_MAX_LIN_ACC_G       0.25f   /* Giới hạn bù gia tốc ngang bánh xe đưa vào Kalman [g] */
 #define IMU_KALMAN_R_BASE       0.03f   /* Hiệp phương sai nhiễu đo góc gia tốc kế khi đứng yên */
 #define IMU_KALMAN_R_LIN_SCALE 40.0f    /* Hệ số tăng R thích nghi khi xe tăng tốc / phanh */
 #define IMU_KALMAN_R_NORM_SCALE 20.0f   /* Hệ số tăng R thích nghi khi rung động làm |norm - 1g| lệch 0 */
-#define IMU_BIAS_FREEZE_ACC_G   0.025f  /* Khóa cập nhật bias gyro khi |a_lin| > 0.025g (~0.25 m/s^2) */
-#define IMU_BIAS_FREEZE_NORM_G  0.06f   /* Khóa cập nhật bias gyro khi |norm - 1g| > 0.06g */
+#define IMU_BIAS_FREEZE_ACC_G   0.065f  /* Khóa cập nhật bias gyro khi |a_lin| > 0.065g */
+#define IMU_BIAS_FREEZE_NORM_G  0.10f   /* Khóa cập nhật bias gyro khi |norm - 1g| > 0.10g */
 #define IMU_IO_TIMEOUT_MS      10U     /* Timeout I2C lúc Init/Calib (khi motor đang tắt) */
-#define IMU_RUNTIME_TIMEOUT_US 2500U   /* Giới hạn cứng 2.5 ms (đo bằng DWT) khi đọc IMU ở vòng 200 Hz */
-#define IMU_MAX_CONSEC_MISS     3U     /* Tối đa 3 chu kỳ (15 ms) dự đoán liên tiếp khi mất mẫu mới */
-#define IMU_MAX_AGE_MS         20U     /* Tuổi mẫu IMU tươi tối đa 20 ms -> quá hạn cắt motor ngay */
+#define IMU_RUNTIME_TIMEOUT_US 2200U   /* Giới hạn cứng 2.2 ms (đo bằng DWT) khi đọc IMU ở vòng 200 Hz */
+#define IMU_RETRY_BUDGET_US    1800U   /* Chỉ thử đọc lại ngay trong cùng chu kỳ 5 ms nếu lần 1 lỗi nhanh + recover < 1.8 ms */
+#define IMU_MAX_CONSEC_MISS     6U     /* Tối đa 6 chu kỳ (30 ms) dự đoán liên tiếp khi mất mẫu mới */
+#define IMU_MAX_AGE_MS         35U     /* Tuổi mẫu IMU tươi tối đa 35 ms -> quá hạn cắt motor ngay */
 #define IMU_CALIB_SAMPLES     300U     /* Calib ~0.6 giây (300 mẫu) giảm nhiễu bias gyro kèm kiểm tra xe đứng yên */
 #define IMU_CALIB_MAX_GYRO_SPREAD_DPS 6.0f  /* Chặn calib nếu gyro dao động > 6 dps */
 #define IMU_CALIB_MAX_ACC_SPREAD_G    0.15f /* Chặn calib nếu gia tốc dao động > 0.15g */
