@@ -5,7 +5,7 @@
   * @brief          : Hardware Skeleton (Branch: main) for STM32L476RG Self-Balancing Robot
   *                   Khởi tạo Clock 80 MHz, GPIO, I2C1 (ICM-20602), TIM1 (PWM 10 kHz),
   *                   TIM2/TIM3 (Encoder x4), TIM6 (200 Hz), USART2 (115200 8N1).
-  *                   Xem nhánh Project_self_PID hoặc Project_motion cho thuật toán điều khiển.
+  *                   Xem nhánh Project_self_PID, Project_motion hoặc Project_self_tuning.
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -132,7 +132,7 @@ void SystemClock_Config(void)
 static void MX_I2C1_Init(void)
 {
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x10425F73;
+  hi2c1.Init.Timing = IMU_I2C_TIMING;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -142,7 +142,7 @@ static void MX_I2C1_Init(void)
   hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
   if (HAL_I2C_Init(&hi2c1) != HAL_OK) Error_Handler();
   if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK) Error_Handler();
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 4) != HAL_OK) Error_Handler();
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, IMU_I2C_DNF) != HAL_OK) Error_Handler();
 }
 
 static void MX_TIM1_Init(void)

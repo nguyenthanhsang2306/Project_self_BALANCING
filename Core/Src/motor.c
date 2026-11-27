@@ -113,7 +113,7 @@ bool Motor_Enable(Motor_System_t *s) {
 }
 
 static int16_t output(int16_t value,int16_t limit,int16_t deadband,int8_t sign) {
-    if(!value) return 0;
+    if(!value || (deadband>0 && value>=-2 && value<=2)) return 0;
     int32_t magnitude=value<0?-(int32_t)value:value;
     /* Bù vùng chết mềm tuyến tính quanh điểm 0 (|value| < MOTOR_DEADBAND_RAMP):
      * - Hạ độ dốc quanh 0 để nhiễu gyro không đập qua lại độ rơ hộp số GA12-N20.
